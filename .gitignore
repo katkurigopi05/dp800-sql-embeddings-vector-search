@@ -1,0 +1,18 @@
+# Local secrets (sa password, master key password)
+.env.sql2025
+.env*
+!.env.sql2025.example
+
+# Copyrighted course material
+*.pdf
+
+# Work from other course sections (not part of this repo)
+dab-config.json
+dockerfile
+dockergile
+tblTest.sql
+PupilData.csv
+
+# OS / editor
+.DS_Store
+.vscode/
