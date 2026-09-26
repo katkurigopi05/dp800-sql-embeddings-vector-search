@@ -464,3 +464,186 @@ ELSE
                PromptTokens INT '$.usage.prompt_tokens',
                CompletionTokens INT '$.usage.completion_tokens');
 
+
+GO
+-- 52. Handle changes (section 28): change event streaming (CES), change data capture (CDC),
+-- Change Tracking and Azure Logic Apps
+-- CES streams changes to Azure Event Hubs, which has no free or local option, so it stays as
+-- reference only. On this build sp_enable_event_stream is deprecated in favour of
+-- sp_enable_change_event_stream, and the other procedures have *_change_event_stream_* names too.
+-- CES and CDC can't both be enabled in one database (Msg 22898 / 23650), and DP800 uses CDC.
+-- The master key already exists (README step 2).
+-- CREATE DATABASE SCOPED CREDENTIAL <CredentialName>
+--     WITH IDENTITY = 'SHARED ACCESS SIGNATURE', SECRET = '<Generated SAS Token>';
+-- EXECUTE sys.sp_enable_change_event_stream;
+-- EXECUTE sys.sp_create_change_event_stream_group
+--     @stream_group_name = N'<EventStreamGroupName>',
+--     @destination_type = N'AzureEventHubsAmqp',
+--     @destination_location = N'<AzureEventHubsHostName>/<EventHubsInstance>',
+--     @destination_credential = <CredentialName>,
+--     @max_message_size_kb = <MaxMessageSize>,
+--     @partition_key_scheme = N'<PartitionKeyScheme>';
+-- EXECUTE sys.sp_add_object_to_change_event_stream_group N'<EventStreamGroupName>', N'dbo.tblReviews';
+SELECT name,
+       is_event_stream_enabled,
+       is_cdc_enabled
+FROM   sys.databases;
+
+
+GO
+-- Change Data Capture (CDC). The capture job runs in SQL Server Agent, which is already
+-- running in this container.
+SELECT is_cdc_enabled,
+       *
+FROM   sys.databases;
+
+IF NOT EXISTS (SELECT 1
+               FROM   sys.databases
+               WHERE  name = DB_NAME()
+                      AND is_cdc_enabled = 1)
+    EXECUTE sys.sp_cdc_enable_db;
+
+
+GO
+-- The message about CLR being disabled is informational. The VECTOR columns are captured too
+-- (as varbinary).
+IF NOT EXISTS (SELECT 1
+               FROM   sys.tables
+               WHERE  object_id = OBJECT_ID('dbo.tblReviews')
+                      AND is_tracked_by_cdc = 1)
+    EXECUTE sys.sp_cdc_enable_table
+        @source_schema = N'dbo',
+        @source_name = N'tblReviews',
+        @role_name = NULL;
+
+SELECT *
+FROM   [cdc].[captured_columns];
+
+
+GO
+-- idxVector makes the table read-only (Msg 42231), and the error is raised when the batch
+-- compiles, so drop it in its own batch. It's created again at the end of this section.
+DROP INDEX IF EXISTS idxVector ON tblReviews;
+
+
+GO
+UPDATE dbo.tblReviews
+SET    ID = 200
+WHERE  ID = 100;
+
+-- The capture job reads the log every 5 seconds, so wait before reading the changes
+WAITFOR DELAY '00:00:10';
+
+-- Changing the primary key is recorded as a delete (__$operation 1) and an insert (2),
+-- not as an update pair (3 = before, 4 = after)
+SELECT *
+FROM   [cdc].[dbo_tblReviews_CT];
+
+DECLARE @from_lsn AS BINARY (10);
+
+DECLARE @to_lsn AS BINARY (10);
+
+SET @from_lsn = sys.fn_cdc_get_min_lsn('dbo_tblReviews');
+
+SET @to_lsn = sys.fn_cdc_get_max_lsn();
+
+SELECT *
+FROM   cdc.fn_cdc_get_all_changes_dbo_tblReviews(@from_lsn, @to_lsn, 'all');
+
+
+GO
+-- Change Tracking (DP800 instead of the course's Azure database name)
+IF NOT EXISTS (SELECT 1
+               FROM   sys.change_tracking_databases
+               WHERE  database_id = DB_ID('DP800'))
+    ALTER DATABASE DP800
+        SET CHANGE_TRACKING = ON
+        (CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON);
+
+IF NOT EXISTS (SELECT 1
+               FROM   sys.change_tracking_tables
+               WHERE  object_id = OBJECT_ID('dbo.tblReviews'))
+    ALTER TABLE dbo.tblReviews ENABLE CHANGE_TRACKING WITH (TRACK_COLUMNS_UPDATED = ON);
+
+SELECT *
+FROM   sys.change_tracking_databases;
+
+SELECT *
+FROM   sys.change_tracking_tables;
+
+
+GO
+DECLARE @synchronization_version AS BIGINT;
+
+-- Obtain the current synchronization version. This will be used next time that changes are obtained.
+SET @synchronization_version = CHANGE_TRACKING_CURRENT_VERSION();
+
+UPDATE dbo.tblReviews
+SET    ID = 100
+WHERE  ID = 200;
+
+-- NULL returns every tracked change
+DECLARE @last_synchronization_version AS BIGINT;
+
+SELECT CT.* --, CT.SYS_CHANGE_OPERATION, CT.SYS_CHANGE_COLUMNS, CT.SYS_CHANGE_CONTEXT
+FROM   CHANGETABLE (CHANGES tblReviews, @last_synchronization_version) AS CT;
+
+-- Our data already says 'Ink jet printers' (the course's WHERE matches 0 rows), so rename the other way
+UPDATE dbo.tblReviews
+SET    Category = 'Inkjet printers'
+WHERE  Category = 'Ink jet printers';
+
+-- TRACK_COLUMNS_UPDATED = ON records which columns an update changed, not just which rows
+SELECT CT.SYS_CHANGE_VERSION,
+       CT.SYS_CHANGE_OPERATION,
+       CT.ID,
+       CHANGE_TRACKING_IS_COLUMN_IN_MASK(COLUMNPROPERTY(OBJECT_ID('dbo.tblReviews'), 'Category', 'ColumnId'), CT.SYS_CHANGE_COLUMNS) AS CategoryChanged
+FROM   CHANGETABLE (CHANGES tblReviews, @synchronization_version) AS CT
+WHERE  CT.SYS_CHANGE_OPERATION = 'U';
+
+
+GO
+-- Azure Logic Apps: the SQL connector's "When an item is modified" trigger polls a rowversion
+-- column. Logic Apps runs in Azure, so reaching this local container would need an on-premises
+-- data gateway; only the table change is done here.
+IF COL_LENGTH('dbo.tblReviews', 'RowVer') IS NULL
+    ALTER TABLE dbo.tblReviews
+        ADD RowVer ROWVERSION;
+
+
+GO
+-- Recreate the vector index dropped above (same as section 64)
+IF NOT EXISTS (SELECT 1
+               FROM   sys.indexes
+               WHERE  name = 'idxVector'
+                      AND object_id = OBJECT_ID('dbo.tblReviews'))
+    CREATE VECTOR INDEX idxVector
+        ON tblReviews (vctVector) WITH (METRIC = 'COSINE', TYPE = 'DISKANN');
+
+SELECT *
+FROM   dbo.tblReviews;
+
+
+GO
+-- Clean up when you're finished with this section. Drop idxVector first (the UPDATE fails
+-- otherwise), then recreate it with section 64:
+-- UPDATE dbo.tblReviews SET Category = 'Ink jet printers' WHERE Category = 'Inkjet printers';
+-- ALTER TABLE dbo.tblReviews DROP COLUMN RowVer;
+-- ALTER TABLE dbo.tblReviews DISABLE CHANGE_TRACKING;
+-- ALTER DATABASE DP800 SET CHANGE_TRACKING = OFF;
+-- EXECUTE sys.sp_cdc_disable_table @source_schema = N'dbo', @source_name = N'tblReviews', @capture_instance = N'dbo_tblReviews';
+-- EXECUTE sys.sp_cdc_disable_db;
+
+
+--52b, 55e. Change Data Capture (CDC)
+EXEC sys.sp_cdc_enable_db
+GO
+SELECT *
+FROM sys.databases
+
+
+
+
+
+
+
