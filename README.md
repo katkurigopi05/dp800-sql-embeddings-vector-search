@@ -20,6 +20,7 @@ The course uses Azure SQL Database with paid Microsoft Foundry models. This repo
 | File | Purpose |
 |---|---|
 | `Reviews.sql` | Creates `tblReviews` with 106 product reviews (sample data) |
+| `tblReviews.csv` | The same 106 reviews as CSV (`ID`, `Category`, `ProductName`, `Review`), without embeddings |
 | `setup-gemini-embeddings.sh` | Creates `EmbeddingModel` pointing at Gemini; asks for the API key with hidden input and stores it only in a database credential |
 | `embeddings-local.sql` | Adds `vctVector`, fills it in batches, runs a semantic search |
 | `tblReviews.sql` | My step-by-step course work (sections 24–28) |
@@ -70,4 +71,4 @@ Connect your editor to `localhost,1434`, database `DP800`, SQL login `sa`, with 
 
 ## Data attribution
 
-`Reviews.sql` is derived from [SAP-samples/datahub-dine](https://github.com/SAP-samples/datahub-dine) (Apache License 2.0), as adapted for the DP-800 course. See the header of that file.
+`Reviews.sql` and `tblReviews.csv` are derived from [SAP-samples/datahub-dine](https://github.com/SAP-samples/datahub-dine) (Apache License 2.0), as adapted for the DP-800 course. See the header of that file.
